@@ -63,3 +63,4 @@ notes/
 
 - 09-14 开营，Task 1 环境准备启动
 - 09-14 Task 1 完成：doctor 22 项全过、前后端启动验证、准备篇技能安装、LangSmith CLI 就绪（四个坑见 task1 笔记）；准备篇 5.3 Trace 瓶颈分析实操完成（见 task2 目录）
+- 09-14 第 1 章白话笔记完成（三层架构 + Context Engineering，见 task2 目录）；macOS 升级后恢复 embedded seekdb 模式验证通过
