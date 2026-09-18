@@ -16,7 +16,7 @@ Datawhale 开源课程 [Deep Agents 实战](https://github.com/datawhalechina/de
 | Task | 内容 | 天数 | 截止时间 | 状态 |
 | --- | --- | --- | --- | --- |
 | Task 1 | 环境准备（Python、模型 API、Git、LangSmith 环境自检） | 1 天 | 09-15 | ✅ |
-| Task 2 | 第 1 章 Agent Framework、Runtime 与 Harness；第 2 章快速上手 | 3 天 | 09-18 | 🔵 |
+| Task 2 | 第 1 章 Agent Framework、Runtime 与 Harness；第 2 章快速上手 | 3 天 | 09-18 | ✅ |
 | Task 3 | 第 3 章 虚拟文件系统与存储后端 | 3 天 | 09-21 | ⬜ |
 | Task 4 | 第 4 章 任务规划与分解 | 3 天 | 09-24 | ⬜ |
 | Task 5 | 第 5 章 子 Agent 与上下文隔离 | 2 天 | 09-26 | ⬜ |
@@ -64,3 +64,4 @@ notes/
 - 09-14 开营，Task 1 环境准备启动
 - 09-14 Task 1 完成：doctor 22 项全过、前后端启动验证、准备篇技能安装、LangSmith CLI 就绪（四个坑见 task1 笔记）；准备篇 5.3 Trace 瓶颈分析实操完成（见 task2 目录）
 - 09-14 第 1 章白话笔记完成（三层架构 + Context Engineering，见 task2 目录）；macOS 升级后恢复 embedded seekdb 模式验证通过
+- 09-17 第 2 章快速上手完成：Hello World + 计算器双实验跑通；踩到小模型链式调用坑并三层修复（工具防御/docstring/prompt），笔记与可复现代码在 task2 目录。**Task 2 完成**
