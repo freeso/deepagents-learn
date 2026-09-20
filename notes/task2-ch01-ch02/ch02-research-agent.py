@@ -82,24 +82,36 @@ question = (
     if len(sys.argv) > 1
     else "什么是 LangGraph？它和 LangChain 是什么关系？"
 )
-print(f"[问题] {question}\n")
-result = agent.invoke({"messages": [{"role": "user", "content": question}]})
+print(f"[问题] {question}")
+print(f"[模型] {model.model_name}")
+print("[运行中] 以下为 Agent 实时动作流（invoke 是黑盒等待，stream 能看到每一步）：\n")
 
-# ---- 附：观察 Agent 背后做了什么（比课程多走一步） ----
+# ---- 流式运行：stream_mode="updates" 每个节点执行完就推一次更新 ----
 from langchain_core.messages import ToolMessage  # noqa: E402
 
-tool_calls: list[tuple[str, str]] = []
-for msg in result["messages"]:
-    # AIMessage.tool_calls：模型发起的工具调用（工具名 + 参数）
-    for tc in getattr(msg, "tool_calls", None) or []:
-        tool_calls.append((tc["name"], str(tc["args"])[:80]))
-    # ToolMessage：工具实际执行的记录（工具名）
-    if isinstance(msg, ToolMessage):
-        tool_calls.append((f"  -> {msg.name}", f"结果 {len(str(msg.content))} 字符"))
+final_messages: list = []
+for chunk in agent.stream(
+    {"messages": [{"role": "user", "content": question}]},
+    stream_mode="updates",
+):
+    for node_name, node_update in chunk.items():
+        msgs = (node_update or {}).get("messages", [])
+        for msg in msgs:
+            # 模型发起的工具调用：实时打印工具名和参数
+            for tc in getattr(msg, "tool_calls", None) or []:
+                print(f"  ⚙️  [{node_name}] 调用工具 {tc['name']}({str(tc['args'])[:100]})")
+            # 工具执行结果：打印结果大小
+            if isinstance(msg, ToolMessage):
+                status = "✅" if msg.status == "success" else f"⚠️ {msg.status}"
+                print(f"  {status} [{node_name}] {msg.name} 返回 {len(str(msg.content))} 字符")
+        final_messages.extend(msgs)
 
-print(f"\n[Agent 共发起 {sum(1 for n, _ in tool_calls if not n.startswith(' '))} 次工具调用]")
-for name, detail in tool_calls:
-    print(f"  {name:20s} {detail}")
+# ---- 统计信息 ----
+tool_call_count = sum(
+    1 for m in final_messages if getattr(m, "tool_calls", None)
+    for _ in m.tool_calls
+)
+print(f"\n[Agent 共发起 {tool_call_count} 次工具调用]")
 
 print("\n[最终回答]")
-print(result["messages"][-1].content)
+print(final_messages[-1].content)
