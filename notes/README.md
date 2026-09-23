@@ -18,7 +18,7 @@ Datawhale 开源课程 [Deep Agents 实战](https://github.com/datawhalechina/de
 | Task 1 | 环境准备（Python、模型 API、Git、LangSmith 环境自检） | 1 天 | 09-15 | ✅ |
 | Task 2 | 第 1 章 Agent Framework、Runtime 与 Harness；第 2 章快速上手 | 3 天 | 09-18 | ✅ |
 | Task 3 | 第 3 章 虚拟文件系统与存储后端 | 3 天 | 09-21 | ✅ |
-| Task 4 | 第 4 章 任务规划与分解 | 3 天 | 09-24 | ⬜ |
+| Task 4 | 第 4 章 任务规划与分解 | 3 天 | 09-24 | ✅ |
 | Task 5 | 第 5 章 子 Agent 与上下文隔离 | 2 天 | 09-26 | ⬜ |
 | Task 6 | 第 6 章 异步子 Agent、第 7 章 Skills | 4 天 | 09-30 | ⬜ |
 | Task 7 | 第 8 章 长期记忆、第 9 章 Human-in-the-Loop | 4 天 | 10-04 | ⬜ |
@@ -66,3 +66,4 @@ notes/
 - 09-14 第 1 章白话笔记完成（三层架构 + Context Engineering，见 task2 目录）；macOS 升级后恢复 embedded seekdb 模式验证通过
 - 09-17 第 2 章快速上手完成：Hello World + 计算器双实验跑通；踩到小模型链式调用坑并三层修复（工具防御/docstring/prompt），笔记与可复现代码在 task2 目录。**Task 2 完成**
 - 09-18 第 3 章虚拟文件系统完成：5 个实验覆盖 4 种 Backend（State/Filesystem/Store/Composite）+ 权限拦截 + 大结果自动卸载验证，含 8 个踩坑记录，见 task3 目录。**Task 3 完成**（提前 3 天）
+- 09-18 第 4 章任务规划完成：开/关 TodoListMiddleware 对比、todos 跨 invoke 接续、SummarizationMiddleware 摘要触发观察三个实验，含 6 个踩坑记录（含提示词不匹配导致模型幻觉调工具），见 task4 目录。**Task 4 完成**（提前 6 天）
