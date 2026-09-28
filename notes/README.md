@@ -20,7 +20,7 @@ Datawhale 开源课程 [Deep Agents 实战](https://github.com/datawhalechina/de
 | Task 3 | 第 3 章 虚拟文件系统与存储后端 | 3 天 | 09-21 | ✅ |
 | Task 4 | 第 4 章 任务规划与分解 | 3 天 | 09-24 | ✅ |
 | Task 5 | 第 5 章 子 Agent 与上下文隔离 | 2 天 | 09-26 | ✅ |
-| Task 6 | 第 6 章 异步子 Agent、第 7 章 Skills | 4 天 | 09-30 | 🔵 |
+| Task 6 | 第 6 章 异步子 Agent、第 7 章 Skills | 4 天 | 09-30 | ✅ |
 | Task 7 | 第 8 章 长期记忆、第 9 章 Human-in-the-Loop | 4 天 | 10-04 | ⬜ |
 | Task 8 | 综合项目开发、Demo 结营 | 2 天 | 10-06 | ⬜ |
 
@@ -69,3 +69,4 @@ notes/
 - 09-18 第 4 章任务规划完成：开/关 TodoListMiddleware 对比、todos 跨 invoke 接续、SummarizationMiddleware 摘要触发观察三个实验，含 6 个踩坑记录（含提示词不匹配导致模型幻觉调工具），见 task4 目录。**Task 4 完成**（提前 6 天）
 - 09-28 第 5 章子 Agent 与上下文隔离完成：隔离量化对比（委派后主上下文仅 47%）+ 草稿隔离/档案共享边界验证 + 三部门协作流水线，三轮迭代挖出"摘要太瘦→经理回读档案拆台"和"接力传话失真"两个深层发现，见 task5 目录。**Task 5 完成**
 - 09-28 第 6 章异步子 Agent 完成：本地 Agent Server（langgraph dev）+ ASGI 单部署，七轮对话验证 5 把遥控器（派活 4 秒返任务 ID、update 带历史重跑生效、cancel 成功），从 thread state 实证 async_tasks 独立通道，见 task6 目录。Task 6 进行中（待第 7 章 Skills）
+- 09-28 第 7 章 Skills 完成：三级渐进加载实证（书脊注入系统提示词/正文/附录，写了自己的 CaptureSystemPrompt 中间件才抓到 request-time 注入的证据）+ shared/project 分层 last-wins 覆盖 + 只读权限 deny 对照组，见 task6 目录。**Task 6 完成**（提前 2 天）
