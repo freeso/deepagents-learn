@@ -7,3 +7,6 @@
 # 临时文件
 *.tmp
 .tmp/
+
+# Python 缓存
+__pycache__/
