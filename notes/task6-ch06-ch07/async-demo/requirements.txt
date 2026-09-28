@@ -1,0 +1,6 @@
+deepagents>=0.5.0
+langgraph
+langgraph-sdk
+langchain-openai
+# 启动本地 Agent Server 需要（提供 langgraph dev 命令）：
+langgraph-cli[inmem]
