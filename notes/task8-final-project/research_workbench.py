@@ -17,6 +17,7 @@
   /skills/**     agent_data/skills/    技能手册（只读，随仓库提交）
   /policies/**   agent_data/policies/  发布政策（只读，随仓库提交）
   /reports/**    .tmp/workshop/reports/ 初稿 drafts/ 免审批，定稿 final/ 需审批
+  /materials/**  .tmp/workshop/materials/ 资料摘要中转站（收集员写盘，撰稿人读盘——ch05 隔文件交接）
 
 用法：
   python research_workbench.py               # 交互聊天（演示入口）
@@ -30,7 +31,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -40,6 +43,7 @@ DATA_DIR = os.path.join(BASE_DIR, "agent_data")
 RUNTIME_DIR = os.path.join(BASE_DIR, ".tmp", "workshop")
 STORE_PATH = os.path.join(RUNTIME_DIR, "store.json")
 REPORTS_DIR = os.path.join(RUNTIME_DIR, "reports")
+MATERIALS_DIR = os.path.join(RUNTIME_DIR, "materials")
 
 DEFAULT_USER = "cherry"
 
@@ -63,7 +67,7 @@ from langchain.tools import tool  # noqa: E402
 from langchain_core.language_models.fake_chat_models import (  # noqa: E402
     FakeMessagesListChatModel,
 )
-from langchain_core.messages import AIMessage  # noqa: E402
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 from langchain_openai import ChatOpenAI  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 from langgraph.store.base import (  # noqa: E402
@@ -74,7 +78,9 @@ from langgraph.store.base import (  # noqa: E402
     PutOp,
     SearchOp,
 )
+from langgraph.errors import GraphRecursionError  # noqa: E402
 from langgraph.types import Command  # noqa: E402
+from openai import RateLimitError as OpenAIRateLimitError  # noqa: E402
 
 from deepagents import FilesystemPermission, create_deep_agent  # noqa: E402
 from deepagents.backends import (  # noqa: E402
@@ -92,11 +98,15 @@ from deepagents.profiles.harness.harness_profiles import (  # noqa: E402
 )
 
 # 弱模型防护（第 5/7/8/9 章同款）：关掉默认通用子 Agent，只留我们定义的
+# 同时剔除默认 SummarizationMiddleware：本项目对话口径小，不需要摘要压缩，
+# 而它驱逐旧消息的行为会把 task 工具的 ToolMessage 抽走，制造"悬空调用"
+# （PatchToolCalls 补出 did not complete 假错）→ 主 Agent 误判委派失败
 try:
     register_harness_profile(
         "openai",
         HarnessProfileConfig(
-            general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)
+            general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
+            excluded_middleware=["SummarizationMiddleware"],
         ),
     )
 except Exception:  # 已注册过则忽略（同进程多次 build 时）
@@ -252,6 +262,40 @@ def ran(name: str, *keywords: str) -> bool:
 # 工具内部用普通文件 IO 复制初稿，不长两手的写 content 又绕开弱模型长参数短板。
 # （agent 的 write_file 对 /reports/final/** 是 deny —— 不许绕过审批）
 # =====================================================================
+def _publish_gate_issues(draft_path: str) -> list[str]:
+    """发布关口四查（含路径与原料链）：返回问题清单，空列表 = 可发布。
+
+    publish_report 与监工审批预检共用同一把尺子：预检合格才准批，
+    不合格就连病因一起驳回。这样弱模型的“口头完成”永远骗不过关口，
+    也避免“盲锁存熔断”把后来真实写好的初稿一并拒掉。
+    """
+    rel = str(draft_path).removeprefix("/reports/")
+    src = os.path.join(REPORTS_DIR, rel)
+    if not rel.startswith("drafts/") or not os.path.isfile(src):
+        return [f"初稿 {draft_path} 在 /reports/drafts/ 下不存在（撰稿人还没真实写入）"]
+    with open(src) as f:
+        content = f.read()
+    summary_path = os.path.join(MATERIALS_DIR, "summary.md")
+    if not os.path.isfile(summary_path):
+        return ["/materials/summary.md 不存在，资料链断裂（先重委派 data-collector 补写摘要）"]
+    with open(summary_path) as f:
+        summary_text = f.read()
+    issues = []
+    if any(p in content for p in ("明确的推荐对象", "这段报告写给什么样的人")):
+        issues.append("初稿里还留着模板占位符（撰稿人没有真实撰写）")
+    if len(content) < 200:
+        issues.append("初稿正文不足 200 字（违反发布政策条款 1）")
+    i_concl, i_anal = content.find("## 结论"), content.find("## 分析")
+    if i_concl < 0 or i_anal < 0 or i_concl > i_anal:
+        issues.append("初稿必须包含'## 结论'和'## 分析'且结论在前（违反条款 2）")
+    missing = [
+        n for n in sorted(set(re.findall(r"\d{3,}", summary_text))) if n not in content
+    ]
+    if missing:
+        issues.append("关键数字 " + "、".join(missing) + " 没有出现在初稿里（数字保真失败）")
+    return issues
+
+
 @tool
 def publish_report(draft_path: str) -> str:
     """发布报告：把草稿区 /reports/drafts/ 下的初稿发布到最终报告区 /reports/final/（同名文件）。发布动作需要人工审批。
@@ -263,17 +307,19 @@ def publish_report(draft_path: str) -> str:
         str: 发布成功提示；路径非法或初稿不存在时返回 Error 说明。
     """
     EXECUTED_LOG.append(("publish_report", draft_path))
-    rel = draft_path.removeprefix("/reports/")
-    src = os.path.join(REPORTS_DIR, rel)
-    if not (rel.startswith("drafts/") and os.path.isfile(src)):
+    issues = _publish_gate_issues(draft_path)
+    if issues:
         return (
-            f"Error: 初稿 {draft_path} 不存在（/reports/drafts/ 下没有这个文件），"
-            "说明撰稿人 report-writer 还没有真实写入初稿。请重新委派 report-writer，"
-            "等它真正用 write_file 写入 /reports/drafts/ 并汇报路径后，再来发布。"
+            "Error: 初稿未通过发布关口校验——" + "；".join(issues)
+            + "。纠错指引：初稿缺失或内容不合格 → 重新委派 report-writer"
+            "（description='撰写对比研究报告初稿，资料摘要见 /materials/summary.md'）；"
+            "摘要缺失 → 先委派 data-collector 把摘要写入 /materials/summary.md。"
+            "等磁盘真实达标后再来发布。"
         )
-    dst = os.path.join(REPORTS_DIR, "final", os.path.basename(src))
+    src = os.path.join(REPORTS_DIR, "drafts", os.path.basename(draft_path))
     with open(src) as f:
         content = f.read()
+    dst = os.path.join(REPORTS_DIR, "final", os.path.basename(src))
     with open(dst, "w") as f:
         f.write(content)
     return f"发布成功：/reports/final/{os.path.basename(src)}"
@@ -299,13 +345,18 @@ SYS_MAIN = (
     "1. 先用 write_todos 制定任务清单，至少包含：委派资料收集、委派撰稿、"
     "发布审批三项；\n"
     "2. 委派子 Agent data-collector 收集资料（任务描述只写需要哪些品牌的"
-    "什么资料），拿到它的【资料摘要】后立即进入第 3 步——"
+    "什么资料）——它会查询数据库并把【资料摘要】写入 /materials/summary.md。"
+    "拿到摘要后立即进入第 3 步——"
     "禁止重复委派 data-collector（资料已经在手，重复委派是违规）；\n"
-    "3. 把资料摘要全文连同调研主题一起委派给子 Agent report-writer 撰写初稿。"
-    "委派的任务描述里必须把【资料摘要】逐字附上（所有数字都要在，"
-    "只写'根据资料摘要撰写'而不附原文是违规），等它回复'初稿已完成：<路径>'；\n"
+    "3. 委派子 Agent report-writer 撰写初稿：任务描述写清调研主题即可"
+    "（如'撰写 Aurora 和 Nimbus 对比研究报告初稿'，撰稿人会自己读取 "
+    "/materials/summary.md 取数，不要往任务描述里堆资料），"
+    "等它回复'初稿已完成：<路径>'；\n"
     "4. 调用 publish_report 工具发布（参数就是撰稿人给出的初稿路径），"
     "发布需要用户审批，批准后工具才会执行成功；"
+    "撰稿人回复'初稿已完成'后直接进入发布，不要重复委派 report-writer；"
+    "唯一例外：publish_report 返回 Error 明确要求重写或补材料时，按错误提示"
+    "重新委派一次对应的子 Agent；"
     "禁止用 write_file 自己往 /reports/final/ 写文件；\n"
     "5. publish_report 返回成功后，用如下格式回复：\n"
     "『报告已发布：<定稿路径>；结论摘要：<一句话>』。"
@@ -319,53 +370,213 @@ SYS_MAIN = (
     "修改 /policies/ 或 /skills/ 目录下的任何文件。"
 )
 
-# 监工回话：模型半途播报/虚报/打转时，用地面真值把它拍回工作流（验证与演示共用）
+# 监工兜底话术（磁盘上两处线索都还没有时的通用催办）
 NUDGE = (
-    "继续执行，注意不要打转：\n"
-    "- 如果 data-collector 已经返回过【资料摘要】，不要再重复委派它；"
-    "- 下一步应把资料摘要委派给 report-writer 撰写初稿（写入 /reports/drafts/）；"
-    "- 初稿就位后调用 publish_report 发布；\n"
-    "- 每个动作都要用真实的工具调用完成，文件真实存在之前禁止声称已发布。"
+    "继续执行，注意不要打转、不要重复已完成的动作：\n"
+    "- 摘要还没落盘：委派 data-collector 收集资料（它会把摘要写入 /materials/summary.md）；\n"
+    "- 摘要已有但缺初稿：委派 report-writer（description 写'撰写研究报告初稿，"
+    "资料摘要见 /materials/summary.md'即可，撰稿人会自己读盘取数）；\n"
+    "- 初稿就位：调用 publish_report 发布；\n"
+    "- 每个动作只用真实工具调用完成，文件真实存在之前禁止声称已发布。"
 )
 
-COLLECTOR_PROMPT = (
-    "你是资料收集员，负责查询手机数据库并回传摘要。接到任务后必须严格照做：\n"
-    "1. 对任务指定的每一个品牌，分别调用 get_phone_specs 和 get_user_reviews，"
-    "各调用一次即可，禁止重复查询；\n"
-    "2. 全部查询完成后，回复摘要，格式铁律：第一行必须是'【资料摘要】'四个字；"
-    "之后每个品牌一段中文，包含价格（X 元）、电池（X mAh）、重量（X g）三个数字"
-    "和一句最有代表性的用户评论原话；最后一行必须是'资料收集完毕'。\n"
-    "禁止：回复中出现任何 JSON、花括号或原始字段名；跳过查询编造数字；"
-    "只回复'已完成'不给出摘要。"
+
+def build_nudge(
+    agent, cfg, question: str = "", topic_kw: str | None = None
+) -> str:  # noqa: ARG001 签名保留便扩展，当前只用磁盘真值
+    """动态指挥：监工只读磁盘地面真值，把「下一步精确动作」直接喂给模型。
+
+    弱模型（Qwen2.5-7B）两种典型失能：初稿明明已就位却重复委派重写（编造
+    数据覆盖好稿）；摘要明明在手却空手委派（衔接断裂卡死中段）。资料流改为
+    隔文件交接（收集员写 /materials/summary.md，撰稿人自己读盘）后，关键
+    数据不再经过模型的嘴转发，监工只需按磁盘分诊：初稿在 → 直接给发布命令；
+    摘要在 → 一句话 RPC 催委派撰稿人。
+
+    topic_kw（可选）：本轮任务的目标主题词（由调用方确定性传入）。给了它，
+    「摘要 → 初稿 → 发布」整条链都必须围绕该主题——防止磁盘复用多轮任务时，
+    把上一轮残留的合格产物错当成本轮该发布的东西（张冠李戴死锁）。
+    已发布过（final 区有同名文件）的初稿一律不再推发。
+    """
+    summary_path = os.path.join(MATERIALS_DIR, "summary.md")
+    summary_text = ""
+    if os.path.isfile(summary_path):
+        with open(summary_path, encoding="utf-8") as f:
+            summary_text = f.read()
+    fd = os.path.join(REPORTS_DIR, "drafts")
+    finald = os.path.join(REPORTS_DIR, "final")
+    published = set(os.listdir(finald)) if os.path.isdir(finald) else set()
+    drafts = [
+        n for n in (os.listdir(fd) if os.path.isdir(fd) else [])
+        if n.endswith(".md")
+    ]
+    order = sorted(
+        drafts, key=lambda n: os.path.getmtime(os.path.join(fd, n)), reverse=True
+    )  # 新→旧
+    cands = [
+        n for n in order
+        if (topic_kw is None or topic_kw in n) and n not in published
+    ]
+
+    def gate_issues(name: str) -> list[str]:
+        return _publish_gate_issues(f"/reports/drafts/{name}")
+
+    if topic_kw and topic_kw not in summary_text:
+        # 主题链第一环断裂：磁盘上的摘要不是本轮任务的资料 → 先重收集
+        return (
+            "继续执行（不要打转）：磁盘上的 /materials/summary.md 不是本轮任务的"
+            f"资料（缺主题「{topic_kw}」）。请立即委派 data-collector：调用 task 工具，"
+            f"subagent_type='data-collector'，description='{question}"
+            "——查询对比对象的参数与用户口碑，并把【资料摘要】用 write_file "
+            "写入 /materials/summary.md'。"
+        )
+    good = next((n for n in cands if not gate_issues(n)), None)
+    if good:
+        return (
+            "继续执行（不要打转、不要重复已完成动作）：磁盘检查发现合格初稿已就位："
+            f"/reports/drafts/{good}。请立即调用 publish_report 发布，参数为 "
+            f"draft_path='/reports/drafts/{good}'。"
+            "禁止再委派 report-writer 重新撰写或修改初稿（重写会引入编造数据）。"
+            "禁止在发布真正成功之前向用户汇报任何进度。"
+        )
+    if cands:
+        # 有候选初稿但都过不了关：把最新一份的病因带回去，让模型对症纠错
+        issues = "；".join(gate_issues(cands[0]))
+        return (
+            "继续执行（不要打转）：磁盘上的初稿过不了发布关口——" + issues
+            + "。请重新委派 report-writer：调用 task 工具，"
+            "subagent_type='report-writer'，description='撰写对比研究报告初稿，"
+            "资料摘要见 /materials/summary.md'，等它用 write_file 真实重写初稿后再来发布。"
+        )
+    if summary_text and (topic_kw is None or topic_kw in summary_text):
+        # 摘要在题上但初稿没人写 → 催撰稿
+        return (
+            "继续执行（不要打转、不要重复已完成动作）：磁盘检查发现资料摘要已落盘"
+            "（/materials/summary.md，data-collector 的工作已完成）。"
+            "请立即委派 report-writer 撰写初稿：调用 task 工具，"
+            "subagent_type='report-writer'，"
+            "description='撰写对比研究报告初稿，资料摘要见 /materials/summary.md'。"
+            "禁止再委派 data-collector。"
+        )
+    if ran("get_phone_specs"):
+        # 收集员查过数据但摘要没落盘（它只回话没写文件）——让它补写，而不是空转
+        return (
+            "继续执行（不要打转）：数据显示 data-collector 已经查完，"
+            "但 /materials/summary.md 还没落盘。请委派 data-collector 补写：调用 task 工具，"
+            "subagent_type='data-collector'，description='把你查到的资料摘要用 write_file "
+            "写入 /materials/summary.md（含价格/电池/重量数字和一条用户评论）'。"
+        )
+    return NUDGE
+
+# 同 writer：工作步骤经任务书代码注入，系统提示词置空（实测弱模型对系统提示词
+# 里的长步骤会“读而不做”，对紧邻的用户消息执行率高且不稳定）
+COLLECTOR_PROMPT = ""
+
+COLLECTOR_BRIEF = (
+    "【资料收集任务书】任务描述里提到的每一个手机品牌，都要按下面方式处理，"
+    "全部查完后才算完成：\n"
+    "1. 每个品牌各调用一次 get_phone_specs 和 get_user_reviews（禁止重复查询）；\n"
+    "2. 所有品牌查询完毕后，一次性输出完整的 write_file 调用，把资料摘要写入 "
+    "/materials/summary.md。文件第一行是'【资料摘要】'；之后每个品牌一段中文，"
+    "写出该品牌的价格（X 元）、电池（X mAh）、重量（X g）三个数字"
+    "和一句最有代表性的用户评论原话；最后一行是'资料收集完毕'；\n"
+    "3. write_file 返回成功信息后，回复摘要全文：第一行'【资料摘要】'，"
+    "最后一行'资料收集完毕（已写入 /materials/summary.md）'。"
 )
 
-WRITER_PROMPT = (
-    "你是撰稿人，负责把调研资料写成报告初稿。任务描述里会给出【资料摘要】（含真实数字）。"
-    "接到任务后必须严格照做：\n"
-    "1. 如果任务描述里没有附【资料摘要】或摘要里缺少数字，禁止编写，"
-    "直接回复'任务描述缺少资料摘要，请附上后重新委派'；\n"
-    "2. 用 read_file 读取 /skills/report-writing/SKILL.md，严格按其中步骤执行；\n"
-    "3. 用 read_file 读取 /policies/report-policy.md，全文遵守；\n"
-    "4. 按 SKILL 里的报告模板，用 write_file 把初稿写入 /reports/drafts/report-<主题>.md。"
-    "所有数字必须来自【资料摘要】原文，一个都不许编；"
-    "禁止出现模板占位符（如'（明确的推荐对象…'）和凭空编造的评分/评测文件；\n"
-    "5. write_file 返回成功信息之后，才能回复，回复第一行必须是"
-    "'初稿已完成：/reports/drafts/<主题>.md'，再附两行内容摘要。\n"
-    "禁止：不读规范就写；write_file 没有真实执行就声称完成。"
+# 实测结论（probe_writer_solo.py，Qwen2.5-7B，可复现）：同一段工作步骤
+# 写进系统提示词时模型会在 write_file 前产出空响应（长内容墙）；
+# 原样放进紧邻的用户消息则一次通过。因此撰稿人的完整指令不走系统提示词，
+# 也不走主 Agent 转述，而由下面的 WriterBriefing 中间件在开工时由代码注入——
+# 既绕开弱模型的“读而不做”，又天然免疫第 5 章讲的“传话失真”。
+WRITER_PROMPT = ""
+
+WRITER_BRIEF = (
+    "【撰稿任务书】请按顺序执行以下五步，一步都不许跳过：\n"
+    "1. 用 read_file 读取 /materials/summary.md，记住两机的价格、电池容量、"
+    "重量这六个数字和两句用户评论；\n"
+    "2. 用 read_file 读取 /skills/report-writing/SKILL.md，记住报告模板；\n"
+    "3. 用 read_file 读取 /policies/report-policy.md，记住每条条款；\n"
+    "4. 一次性输出完整的 write_file 调用，把报告初稿写入"
+    " /reports/drafts/report-<对象一>-<对象二>.md"
+    "（对比 Aurora 和 Nimbus 时就是 /reports/drafts/report-Aurora-Nimbus.md）。"
+    "报告第一行是'【研究报告】'，接着'## 结论'小节必须明确推荐其中一款手机"
+    "并用一句话说明理由；'## 分析'小节用完整句子分别比较两机的价格、电池、"
+    "重量，各引用一句用户评论原话，每个数字后面注明（数据来源：参数库），"
+    "评论注明（数据来源：口碑库）；正文不少于 250 字。"
+    "初稿只写 /reports/drafts/，不要写 /reports/final/；\n"
+    "5. write_file 返回成功信息后，回复的第一行写"
+    "'初稿已完成：/reports/drafts/<文件名>'。"
 )
+
+
+class BriefingInjector(AgentMiddleware):
+    """任务书注入器：子 Agent 开工时，把完整工作步骤原样注入为用户消息。"""
+
+    def __init__(self, brief: str):
+        super().__init__()
+        self.brief = brief
+
+    def before_agent(self, state, runtime):  # noqa: ARG002
+        msgs = state.get("messages") or []
+        if any(
+            m.type == "human" and getattr(m, "content", "") == self.brief
+            for m in msgs
+        ):
+            return None
+        return {"messages": [HumanMessage(content=self.brief)]}
+
+
+class HandoffGate(AgentMiddleware):
+    """确定性交接闸门（ch05 落盘为凭）：撰稿人开工前必须有原料。
+
+    弱模型会在收集员只回话没写盘时就委派撰稿人，导致撰稿人无米下锅
+    写出垃圾稿。闸门在工具执行层拦截：/materials/summary.md 不存在时
+    打回 report-writer 委派，并给出下一步正确动作（不给拒绝模板，
+    防止弱模型把模板当台词背出来）。
+    """
+
+    def _blocked(self, request):
+        tc = getattr(request, "tool_call", None) or {}
+        if tc.get("name") != "task":
+            return None
+        args = tc.get("args") or {}
+        if args.get("subagent_type") != "report-writer":
+            return None
+        if os.path.isfile(os.path.join(MATERIALS_DIR, "summary.md")):
+            return None
+        return ToolMessage(
+            content=(
+                "Error: 交接闸门——/materials/summary.md 还不存在，撰稿人没有原料，"
+                "此时委派 report-writer 只会产出垃圾稿。请先委派 data-collector："
+                "调用 task 工具，subagent_type='data-collector'，"
+                "description='调研对象的参数与口碑，并把【资料摘要】用 write_file "
+                "写入 /materials/summary.md'。它写盘成功后再委派 report-writer。"
+            ),
+            name="task",
+            tool_call_id=tc.get("id", ""),
+            status="error",
+        )
+
+    def wrap_tool_call(self, request, handler):
+        return self._blocked(request) or handler(request)
+
+    async def awrap_tool_call(self, request, handler):
+        return self._blocked(request) or await handler(request)
 
 DATA_COLLECTOR = {
     "name": "data-collector",
     "description": "收集手机参数与用户口碑数据时委派给它，它会查询数据库并返回要点摘要（含关键数字）。",
-    "system_prompt": COLLECTOR_PROMPT,
+    "system_prompt": COLLECTOR_PROMPT,  # 置空：工作步骤由 BriefingInjector 注入
     "tools": [get_phone_specs, get_user_reviews],
+    "middleware": [BriefingInjector(COLLECTOR_BRIEF)],
 }
 
 REPORT_WRITER = {
     "name": "report-writer",
     "description": "撰写报告初稿时委派给它。把资料摘要交给它，它会按写作规范和政策成稿并写入 /reports/drafts/。",
-    "system_prompt": WRITER_PROMPT,
+    "system_prompt": WRITER_PROMPT,  # 置空：工作步骤由 BriefingInjector 注入（见上）
     "tools": [],  # 文件工具自动注入（第 5 章源码结论）
+    "middleware": [BriefingInjector(WRITER_BRIEF)],
 }
 
 
@@ -373,6 +584,9 @@ REPORT_WRITER = {
 # 中间件：偷拍员（记录每次模型调用实际收到的系统提示词，验证注入用）
 # =====================================================================
 CAPTURED_PROMPTS: list[str] = []
+
+# 全链工具执行台账（含子 Agent）：wrap_tool_call 拦的是真实执行，不是模型嘴
+TOOL_CALL_LOG: list[tuple] = []
 
 
 class CaptureSystemPrompt(AgentMiddleware):
@@ -389,6 +603,21 @@ class CaptureSystemPrompt(AgentMiddleware):
 
     async def awrap_model_call(self, request, handler):
         return self.wrap_model_call(request, handler)
+
+
+class ToolRecorder(AgentMiddleware):
+    """记录每一次真实工具执行（含子 Agent）：名字 + 参数。"""
+
+    def wrap_tool_call(self, request, handler):
+        try:
+            tc = getattr(request, "tool_call", None) or {}
+            TOOL_CALL_LOG.append((tc.get("name", "?"), str(tc.get("args", ""))[:120]))
+        except Exception:  # noqa: BLE001 记录失败不影响执行
+            pass
+        return handler(request)
+
+    async def awrap_tool_call(self, request, handler):
+        return await handler(request)
 
 
 def captured_all() -> list[str]:
@@ -419,13 +648,15 @@ def build_model():
 def ensure_runtime() -> None:
     os.makedirs(os.path.join(REPORTS_DIR, "drafts"), exist_ok=True)
     os.makedirs(os.path.join(REPORTS_DIR, "final"), exist_ok=True)
+    os.makedirs(MATERIALS_DIR, exist_ok=True)
 
 
 def reset_runtime() -> None:
-    """清空运行时数据（store.json + 报告目录），回到全新装机状态。"""
+    """清空运行时数据（store.json + 报告目录 + 资料中转站），回到全新装机状态。"""
     import shutil
 
     shutil.rmtree(REPORTS_DIR, ignore_errors=True)
+    shutil.rmtree(MATERIALS_DIR, ignore_errors=True)
     if os.path.exists(STORE_PATH):
         os.remove(STORE_PATH)
     ensure_runtime()
@@ -458,6 +689,9 @@ def build_workbench(
             "/reports/": FilesystemBackend(
                 root_dir=REPORTS_DIR, virtual_mode=True
             ),
+            "/materials/": FilesystemBackend(
+                root_dir=MATERIALS_DIR, virtual_mode=True
+            ),
             "/memories/": StoreBackend(
                 namespace=lambda rt: (rt.context.user_id, "memories"),
                 store=store,
@@ -487,11 +721,13 @@ def build_workbench(
         context_schema=UserContext,
         checkpointer=InMemorySaver(),  # HITL 必须
         middleware=[
+            HandoffGate(),  # 确定性交接闸门（最外层：被拦下的委派不算真实执行）
             TodoListMiddleware(),  # ch04 任务规划
             # 手动构造 MemoryMiddleware 并放在偷拍员外层（第 8 章源码结论：
             # memory= 交给 create_deep_agent 的注入位置比用户中间件更深，拍不到）
             MemoryMiddleware(backend=composite, sources=["/memories/preferences.md"]),
             CaptureSystemPrompt(),
+            ToolRecorder(),
         ],
         system_prompt=SYS_MAIN,
     )
@@ -502,7 +738,7 @@ def build_workbench(
 # 通用小工具（供 verify.py 与交互入口共用）
 # =====================================================================
 def invoke_v2(agent, payload, cfg, user_id: str = DEFAULT_USER):
-    cfg = {**cfg, "recursion_limit": 60} if "recursion_limit" not in cfg else cfg
+    cfg = {**cfg, "recursion_limit": 80} if "recursion_limit" not in cfg else cfg
     return agent.invoke(
         payload, config=cfg, context=UserContext(user_id), version="v2"
     )
@@ -552,6 +788,18 @@ def read_report(rel_dir: str) -> tuple[str, str]:
         return newest, f.read()
 
 
+def invoke_with_rate_guard(agent, payload, cfg, user_id, max_retries: int = 4):
+    """429 限流自愈：等 30 秒重试同一动作（对话、审批续跑都走这里）。"""
+    for i in range(max_retries):
+        try:
+            return invoke_v2(agent, payload, cfg, user_id)
+        except OpenAIRateLimitError:
+            if i == max_retries - 1:
+                raise
+            print("  ⏳ 监工：上游限流（TPM），等待 30 秒后重试当前动作")
+            time.sleep(30)
+
+
 def auto_run(
     agent,
     question: str,
@@ -559,7 +807,8 @@ def auto_run(
     user_id: str = DEFAULT_USER,
     decider=None,
     goal_check=None,
-    max_steps: int = 5,
+    max_steps: int = 8,
+    topic_kw: str | None = None,
 ):
     """带监工的一轮任务：模型停下来就验收地面真值，目标没达成就自动催办。
 
@@ -567,26 +816,89 @@ def auto_run(
     - decider: action_request -> decision，处理审批中断；None 表示中断直接
       返回给调用方（交互模式下留给人工决策）
     弱模型适配：Qwen2.5-7B 常在长流程中途停下播报甚至虚报完成，
-    监工不读模型嘴，只认磁盘上的事实。
+    监工不读模型嘴，只认磁盘上的事实。三重自愈——动态指挥、停摆升级、
+    关前预检（publish_report 审批前用发布关口同一把尺子预检磁盘：合格才放行，
+    不合格连病因一起驳回，风暴必然收敛）。
     """
     cfg = {"configurable": {"thread_id": thread}}
     payload = {"messages": [{"role": "user", "content": question}]}
     r = None
+    last_calls = -1
+    stalled = 0
     for step in range(max_steps):
         if step:
             print(f"  ⏩ 监工 Round {step}")
-        r = invoke_v2(agent, payload, cfg, user_id)
+        try:
+            r = invoke_with_rate_guard(agent, payload, cfg, user_id)
+        except GraphRecursionError:
+            # 单轮烧完递归配额（子 Agent 内部循环也计入同一计数器）。
+            # 检查点里已有部分进度，下一轮从断点续跑；先打印累计动作供诊断
+            try:
+                snap = agent.get_state(cfg)
+                names = [
+                    tc["name"]
+                    for m in (snap.values or {}).get("messages", [])
+                    for tc in (getattr(m, "tool_calls", None) or [])
+                ]
+                print(f"  ⚠️ 监工：单轮触发递归上限（已累计 {len(names)} 次工具调用，"
+                      f"尾部: {names[-6:]}），从断点续跑")
+            except Exception:  # noqa: BLE001
+                print("  ⚠️ 监工：单轮触发递归上限，从断点续跑")
+            payload = {"messages": [{"role": "user", "content": build_nudge(agent, cfg, question, topic_kw)}]}
+            continue
         while getattr(r, "interrupts", None):
             if decider is None:
                 return r  # 交互模式：交给人工
             ars = show_interrupts(r, "[监工] ")
-            r = invoke_v2(
-                agent, Command(resume={"decisions": [decider(a) for a in ars]}), cfg, user_id
+            decisions = []
+            for a in ars:
+                if a["name"] == "publish_report":
+                    # 关前预检：与发布工具同一把尺子（磁盘真值）。
+                    # 合格的一律放行（哪怕历史上撞过墙），
+                    # 不合格的连病因一起驳回——bug 教训：盲锁存熔断会把
+                    # 后来真实写好的初稿一并拒掉，把流程锁死。
+                    issues = _publish_gate_issues(
+                        str((a.get("args") or {}).get("draft_path", ""))
+                    )
+                    if issues:
+                        print("  🛑 监工关前预检：初稿不合格，驳回并纠偏——"
+                              + "；".join(issues))
+                        decisions.append({
+                            "type": "reject",
+                            "message": (
+                                "驳回本次发布，磁盘预检没过——"
+                                + "；".join(issues)
+                                + "。纠错指引：初稿缺失或内容不合格 → 重新委派 "
+                                "report-writer（description='撰写对比研究报告初稿，"
+                                "资料摘要见 /materials/summary.md'）；摘要缺失 → "
+                                "先委派 data-collector 补写 /materials/summary.md。"
+                                "等磁盘真实达标后再来发布。"
+                            ),
+                        })
+                        continue
+                decisions.append(decider(a))
+            r = invoke_with_rate_guard(
+                agent, Command(resume={"decisions": decisions}), cfg, user_id
             )
         if goal_check is None or goal_check():
             return r
-        print("  🔁 监工：目标未达成（地面真值检查失败），发催办指令")
-        payload = {"messages": [{"role": "user", "content": NUDGE}]}
+        # 停摆检测：这一轮没比上一轮多出任何真实工具调用 → 连续两轮就发最后通牌
+        values_now = values_of(r) if r is not None else {}
+        n_calls = len(tool_calls_of(values_now)) if values_now else 0
+        stalled = stalled + 1 if n_calls <= last_calls else 0
+        last_calls = n_calls
+        nudge = build_nudge(agent, cfg, question, topic_kw)
+        if stalled >= 2:
+            nudge = (
+                "注意：你已连续多轮没有执行任何新的工具调用，只输出文字汇报是违规的。"
+                "不要解释、不要汇报计划，立刻执行且只执行这一个动作：\n" + nudge
+            )
+        print("  🔁 监工：目标未达成（地面真值检查失败），发动态指挥"
+              + ("（升级：检测到停摆）" if stalled >= 2 else ""))
+        payload = {"messages": [{"role": "user", "content": nudge}]}
+    if r is None:
+        msg = "监工轮次耗尽仍未能获得有效的模型回复"
+        raise RuntimeError(msg)
     return r
 
 

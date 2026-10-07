@@ -9,7 +9,7 @@ description: 当用户要求撰写研究报告、成稿对比分析或正式输�
 
 1. 先用 read_file 完整读取 /policies/report-policy.md，全文遵守其中所有条款。**第 1 步没有完成之前，禁止写任何报告文件**；
 2. 按下方模板撰写报告初稿，写入 /reports/drafts/report-<主题>.md；
-3. 对照模板和条款逐条自查初稿，修改后把定稿写入 /reports/final/ 下同名文件。
+3. 对照模板和条款逐条自查初稿；初稿只写到 /reports/drafts/ 为止，发布定稿是上级编辑的职责（需人工审批），撰稿人不要写 /reports/final/。
 
 ## 报告模板（初稿和定稿都必须按此结构）
 

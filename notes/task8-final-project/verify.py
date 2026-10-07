@@ -127,6 +127,10 @@ def scenario1() -> None:
         "【资料摘要】" in main_text or "4999" in main_text,
     )
     check(
+        "ch05 隔文件交接：资料摘要真实落盘 /materials/summary.md（传话失真免疫）",
+        os.path.isfile(os.path.join(wb.MATERIALS_DIR, "summary.md")),
+    )
+    check(
         "ch07 书脊：系统提示词被自动注入技能名（L1 渐进式披露，技能由撰稿人 L2 读正文）",
         any("report-writing" in p for p in wb.captured_all()),
     )
@@ -269,6 +273,7 @@ def scenario4() -> None:
         thread,
         decider=decider,
         goal_check=goal,
+        topic_kw="Zenith",  # 告诉监工本轮主题：磁盘上场景一的 Aurora 产物不算数
     )
     values = wb.values_of(r)
 
