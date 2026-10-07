@@ -22,7 +22,7 @@ Datawhale 开源课程 [Deep Agents 实战](https://github.com/datawhalechina/de
 | Task 5 | 第 5 章 子 Agent 与上下文隔离 | 2 天 | 09-26 | ✅ |
 | Task 6 | 第 6 章 异步子 Agent、第 7 章 Skills | 4 天 | 09-30 | ✅ |
 | Task 7 | 第 8 章 长期记忆、第 9 章 Human-in-the-Loop | 4 天 | 10-04 | ✅ |
-| Task 8 | 综合项目开发、Demo 结营 | 2 天 | 10-06 | ⬜ |
+| Task 8 | 综合项目开发、Demo 结营 | 2 天 | 10-06 | 🔵 |
 
 状态图例：⬜ 未开始 / 🔵 进行中 / ✅ 已完成
 
@@ -72,3 +72,4 @@ notes/
 - 09-28 第 7 章 Skills 完成：三级渐进加载实证（书脊注入系统提示词/正文/附录，写了自己的 CaptureSystemPrompt 中间件才抓到 request-time 注入的证据）+ shared/project 分层 last-wins 覆盖 + 只读权限 deny 对照组，见 task6 目录。**Task 6 完成**（提前 2 天）
 - 09-29 第 8 章长期记忆完成：跨对话记忆全流程（对话1写 Store 验货→新 thread 提示词自动含偏好→user_id 隔离对照组）+ 路径路由对照（临时桌面 vs 档案柜）+ Agent 级共享/组织级只读，挖出“B1 假阳性：文件没动 ≠ deny 生效”“弱模型 deny 重试风暴 11 连”两个值钱发现，见 task7 目录。Task 7 进行中（待第 9 章 HITL）
 - 09-29 第 9 章 HITL 完成：四种决策（approve/edit/reject/respond）铁证验证（执行日志+ToolMessage）+ 批量打包 3 连按序决策 + when 谓词精准放行（加戏邮件照样拦）+ 文件权限 interrupt + 子 Agent 独立审批中断上浮，先假模型探针零成本摸清 API 再上真模型，见 task7 目录。**Task 7 完成**（提前 5 天）
+- 10-07 Task 8 结营项目「深研工坊」开工：三权分立架构（总编辑编排 + data-collector 查数 + report-writer 成稿），CompositeBackend 五路路由 + 自写 JsonFileStore 跨进程记忆 + publish_report 审批发布 + 三区权限（政策/技能/发布区 deny，草稿区放行）+ 监工自愈回路（地面真值检查）；弱模型长 content 短板用"委派子 Agent 写文件 + 短参数发布工具"绕开，验收迭代实录见 task8 目录。Task 8 进行中
